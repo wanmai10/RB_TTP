@@ -3,6 +3,8 @@ setlocal enabledelayedexpansion
 chcp 437 >nul
 mode con: cols=60 lines=40
 color 0A
+set "LOGFILE=%TEMP%\NB9_runtime.log"
+> "%LOGFILE%" echo NB9 started at %DATE% %TIME%
 
 net session >nul 2>&1
 if %errorlevel% neq 0 (
@@ -349,6 +351,7 @@ set /a EMPTY=44-FILLED
 set BAR=
 for /l %%i in (1,1,%FILLED%) do set BAR=!BAR!#
 for /l %%i in (1,1,%EMPTY%) do set BAR=!BAR!-
+>> "%LOGFILE%" echo [STEP] %CUR%/%TOT% - %TITLE% - %DETAIL%
 cls
 echo.
 echo.
@@ -391,6 +394,21 @@ echo    Restarting in 15 seconds...
 echo    Press any key to restart now.
 echo    ----------------------------------------
 echo.
-timeout /t 15
-shutdown /r /t 0 /c "NB9IFUKNOW - Applying changes..."
+>> "%LOGFILE%" echo [DONE] All optimizations completed.
+echo    Waiting 15 seconds before reboot...
+timeout /t 15 >nul
+shutdown /r /f /t 0 /c "NB9IFUKNOW - Applying changes..." >nul 2>&1
+if errorlevel 1 (
+    >> "%LOGFILE%" echo [REBOOT] shutdown failed, trying PowerShell fallback.
+    powershell -NoProfile -Command "Restart-Computer -Force" >nul 2>&1
+)
+if errorlevel 1 (
+    echo.
+    echo    Reboot command failed. Please restart manually.
+    >> "%LOGFILE%" echo [REBOOT] reboot failed.
+    pause
+) else (
+    >> "%LOGFILE%" echo [REBOOT] reboot initiated.
+    exit /b
+)
 exit /b
