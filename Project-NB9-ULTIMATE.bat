@@ -203,25 +203,27 @@ netsh int tcp set global rsc=disabled >nul 2>&1
 netsh int tcp set global rss=enabled >nul 2>&1
 
 call :STEP 40 45 "Interrupt Moderation Rate" "Setting ITR to 0 (Disabled)..."
-powershell -Command "$nic=(Get-NetAdapter -Physical|Where-Object{$_.Status -eq 'Up'}).Name; Set-NetAdapterAdvancedProperty -Name $nic -DisplayName 'Interrupt Moderation Rate' -DisplayValue '0' -EA SilentlyContinue; Set-NetAdapterAdvancedProperty -Name $nic -DisplayName 'ITR' -DisplayValue '0' -EA SilentlyContinue" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }; if ($adapters) { $nic = $adapters | Select-Object -First 1 -ExpandProperty Name; Set-NetAdapterAdvancedProperty -Name $nic -DisplayName 'Interrupt Moderation Rate' -DisplayValue '0' -EA SilentlyContinue; Set-NetAdapterAdvancedProperty -Name $nic -DisplayName 'ITR' -DisplayValue '0' -EA SilentlyContinue }" >nul 2>&1
+>> "%LOGFILE%" echo [DEBUG] Finished Step 40, continuing to Step 41.
 
+>> "%LOGFILE%" echo [DEBUG] Starting CPU detection block.
+set "LOGICAL="
+set "PCORES_PHYSICAL="
+set "IS_HYBRID=0"
+set "PMAX=0"
+set "EMIN=0"
+set "EMAX=0"
+set "PHEX=FFFFFFFF"
 
-
-
-set LOGICAL=0
-set PCORES_PHYSICAL=0
-set IS_HYBRID=0
-set PMAX=0
-set EMIN=0
-set EMAX=0
-set PHEX=FFFFFFFF
-
-for /f "skip=1 tokens=*" %%i in ('wmic cpu get NumberOfLogicalProcessors') do (
-    if not "%%i"=="" if "!LOGICAL!"=="0" set LOGICAL=%%i
+for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty NumberOfLogicalProcessors)" 2^>nul') do (
+    if not defined LOGICAL if not "%%i"=="" set "LOGICAL=%%i"
 )
-for /f "skip=1 tokens=*" %%i in ('wmic cpu get NumberOfCores') do (
-    if not "%%i"=="" if "!PCORES_PHYSICAL!"=="0" set PCORES_PHYSICAL=%%i
+for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty NumberOfCores)" 2^>nul') do (
+    if not defined PCORES_PHYSICAL if not "%%i"=="" set "PCORES_PHYSICAL=%%i"
 )
+
+if not defined LOGICAL set "LOGICAL=8"
+if not defined PCORES_PHYSICAL set "PCORES_PHYSICAL=4"
 
 set /a PLOGICAL=PCORES_PHYSICAL*2
 set /a ELOGICAL=LOGICAL-PLOGICAL
@@ -230,21 +232,31 @@ set /a PMAX=PLOGICAL-1
 set /a EMIN=PLOGICAL
 set /a EMAX=MAXPROC
 
-if !ELOGICAL! GTR 0 set IS_HYBRID=1
+if !ELOGICAL! GTR 0 set "IS_HYBRID=1"
+>> "%LOGFILE%" echo [DEBUG] CPU values: logical=!LOGICAL! physical=!PCORES_PHYSICAL! hybrid=!IS_HYBRID!
 
-set /a AFFINITY_P=0
-for /l %%i in (0,1,%PMAX%) do (
-    set /a AFFINITY_P+=1<<%%i
+set "AFFINITY_P=0"
+set "AFFINITY_E=0"
+set "PHEX=0"
+set "EHEX=0"
+
+for /f "tokens=1,2 delims= " %%a in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$logical = [int](Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty NumberOfLogicalProcessors); $physical = [int](Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty NumberOfCores); $mask = 0; for ($i = 0; $i -lt [Math]::Min($physical, $logical); $i++) { $mask = $mask -bor ([int64]1 -shl $i) }; '{0} {0:X}' -f $mask" 2^>nul') do (
+    set "AFFINITY_P=%%a"
+    set "PHEX=%%b"
 )
-call :ToHex !AFFINITY_P! PHEX
+if not defined AFFINITY_P set "AFFINITY_P=0"
+if not defined PHEX set "PHEX=0"
+>> "%LOGFILE%" echo [DEBUG] P-core affinity value computed: !AFFINITY_P! (0x!PHEX!)
 
-set /a AFFINITY_E=0
 if !IS_HYBRID!==1 (
-    for /l %%i in (!EMIN!,1,!EMAX!) do (
-        set /a AFFINITY_E+=1<<%%i
+    for /f "tokens=1,2 delims= " %%a in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$logical = [int](Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty NumberOfLogicalProcessors); $start = [int]$env:EMIN; $end = [int]$env:EMAX; $mask = 0; if ($logical -gt 0 -and $end -ge $start) { for ($i = $start; $i -le $end; $i++) { $mask = $mask -bor ([int64]1 -shl $i) } }; '{0} {0:X}' -f $mask" 2^>nul') do (
+        set "AFFINITY_E=%%a"
+        set "EHEX=%%b"
     )
 )
-call :ToHex !AFFINITY_E! EHEX
+if not defined AFFINITY_E set "AFFINITY_E=0"
+if not defined EHEX set "EHEX=0"
+>> "%LOGFILE%" echo [DEBUG] E-core affinity value computed: !AFFINITY_E! (0x!EHEX!)
 
 echo.
 echo  NB9 - No Lasso CPU Optimizer
@@ -253,7 +265,7 @@ echo  Logical cores : %LOGICAL%
 echo  P-core range  : 0 - %PMAX%
 if !IS_HYBRID!==1 (
     echo  E-core range  : !EMIN! - !EMAX!
-    echo  P-core mask   : 0x%PHEX%
+    echo  P-core mask   : 0x!PHEX!
     echo  E-core mask   : 0x!EHEX!
 ) else (
     echo  Hybrid CPU    : NO ^(all cores = P-core^)
@@ -262,6 +274,7 @@ echo  ==============================
 echo.
 
 call :STEP 41 45 "CPU Priority" "Setting permanent process priority..."
+>> "%LOGFILE%" echo [DEBUG] Entering Step 41 - CPU Priority.
 
 for %%p in (FiveM.exe GTA5.exe FiveM_GTAProcess.exe) do (
     reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%%p\PerfOptions" /v CpuPriorityClass /t REG_DWORD /d 3 /f >nul 2>&1
@@ -273,10 +286,12 @@ for %%p in (chrome.exe Discord.exe OneDrive.exe SearchIndexer.exe MsMpEng.exe sv
 echo    Done.
 
 call :STEP 42 45 "CPU Scheduler" "Tuning CPU scheduler..."
+>> "%LOGFILE%" echo [DEBUG] Entering Step 42 - CPU Scheduler.
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v Win32PrioritySeparation /t REG_DWORD /d 38 /f >nul 2>&1
 echo    Done.
 
 call :STEP 43 45 "CPU Affinity" "Setting permanent CPU affinity for FiveM..."
+>> "%LOGFILE%" echo [DEBUG] Entering Step 43 - CPU Affinity.
 if !IS_HYBRID!==1 (
     reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\FiveM.exe\PerfOptions" /v CpuAffinityMask /t REG_DWORD /d !AFFINITY_P! /f >nul 2>&1
     reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\GTA5.exe\PerfOptions" /v CpuAffinityMask /t REG_DWORD /d !AFFINITY_P! /f >nul 2>&1
@@ -284,14 +299,14 @@ if !IS_HYBRID!==1 (
     for %%p in (chrome.exe Discord.exe OneDrive.exe SearchIndexer.exe) do (
         reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\%%p\PerfOptions" /v CpuAffinityMask /t REG_DWORD /d !AFFINITY_E! /f >nul 2>&1
     )
-    echo    Hybrid CPU: FiveM pinned to P-cores ^(0x%PHEX%^) 
+    echo    Hybrid CPU: FiveM pinned to P-cores ^(0x!PHEX!^)
     echo    Background pinned to E-cores ^(0x!EHEX!^)
 ) else (
     echo    Non-hybrid CPU: all cores are P-cores, affinity not restricted.
 )
 
 call :STEP 44 45 "Power Mode" "Creating auto power plan switcher..."
-
+>> "%LOGFILE%" echo [DEBUG] Entering Step 44 - Power Mode.
 
 set PS_ON=%APPDATA%\NB9_GameStart.ps1
 set PS_OFF=%APPDATA%\NB9_GameStop.ps1
@@ -314,6 +329,7 @@ echo    Auto power switcher created.
 
 
 call :STEP 45 45 "Affinity Apply" "Applying affinity to running processes now..."
+>> "%LOGFILE%" echo [DEBUG] Entering Step 45 - Affinity Apply.
 if !IS_HYBRID!==1 (
     for %%p in (FiveM GTA5 FiveM_GTAProcess) do (
         powershell -Command "Get-Process '%%p' -EA SilentlyContinue | ForEach-Object { $_.ProcessorAffinity = [IntPtr]!AFFINITY_P! }" >nul 2>&1
